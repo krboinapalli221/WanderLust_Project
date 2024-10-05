@@ -1,0 +1,99 @@
+@Library('Shared') _
+
+pipeline {
+    agent { label 'Node' }
+
+    environment {
+        SONAR_HOME = tool "Sonar"
+    }
+
+    parameters {
+        string(name: 'APP_NAME', defaultValue: 'wanderlust', description: 'Name of the Argo CD Application')
+        string(name: 'ARGOCD_SERVER', defaultValue: '3.136.85.25:30857', description: 'Argo CD Server URL')
+        string(name: 'FRONTEND_DOCKER_TAG', defaultValue: '', description: 'Frontend Docker image tag')
+        string(name: 'BACKEND_DOCKER_TAG', defaultValue: '', description: 'Backend Docker image tag')
+    }
+
+    stages {
+        stage("Validate Parameters") {
+            steps {
+                script {
+                    if (params.FRONTEND_DOCKER_TAG == '' || params.BACKEND_DOCKER_TAG == '') {
+                        error("FRONTEND_DOCKER_TAG and BACKEND_DOCKER_TAG must be provided.")
+                    }
+                }
+            }
+        }
+
+        stage("Workspace Cleanup") {
+            steps {
+                cleanWs()
+            }
+        }
+
+        stage("Git: Code Checkout") {
+            steps {
+                script {
+                    code_checkout("https://github.com/krboinapalli221/WanderLust_Project.git", "main")
+                }
+            }
+        }
+
+        stage("Update YAML Files with New Docker Tags") {
+            steps {
+                script {
+                    sh """
+                    sed -i 's|image: koteswararao221/wanderlust-backend-beta:.*|image: koteswararao221/wanderlust-backend-beta:'${params.BACKEND_DOCKER_TAG}'|' kubernetes/backend.yaml
+                    sed -i 's|image: koteswararao221/wanderlust-frontend-beta:.*|image: koteswararao221/wanderlust-frontend-beta:'${params.FRONTEND_DOCKER_TAG}'|' kubernetes/frontend.yaml
+                    """
+                }
+            }
+        }
+		stage("Verify YAML Changes") {
+    steps {
+        script {
+            sh "git diff kubernetes/backend.yaml kubernetes/frontend.yaml"
+        }
+    }
+}
+
+
+        stage("Git: Commit and Push Changes") {
+            steps {
+                script {
+                    withCredentials([usernamePassword(credentialsId: 'Github_cred', usernameVariable: 'GIT_USERNAME', passwordVariable: 'GIT_PASSWORD')]) {
+                        sh """
+                        git config user.name "${GIT_USERNAME}"
+                        git config user.email "${GIT_USERNAME}@email.com"
+                        git add kubernetes/*.yaml
+                        git commit -m "Updated Docker tags to backend: ${params.BACKEND_DOCKER_TAG}, frontend: ${params.FRONTEND_DOCKER_TAG}"
+                        git push https://${GIT_USERNAME}:${GIT_PASSWORD}@github.com/krboinapalli221/WanderLust_Project.git HEAD:main
+                        """
+                    }
+                }
+            }
+        }
+
+        stage("Trigger Argo CD Sync") {
+            steps {
+                script {
+                    withCredentials([usernamePassword(credentialsId: 'argocd_credentials', usernameVariable: 'ARGOCD_USERNAME', passwordVariable: 'ARGOCD_PASSWORD')]) {
+                        sh """
+                        argocd login ${params.ARGOCD_SERVER} --username ${ARGOCD_USERNAME} --password ${ARGOCD_PASSWORD} --insecure
+                        argocd app sync ${params.APP_NAME}
+                        """
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo 'CD Pipeline completed successfully!'
+        }
+        failure {
+            echo 'CD Pipeline failed!'
+        }
+    }
+}
