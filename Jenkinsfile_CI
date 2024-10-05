@@ -1,0 +1,119 @@
+@Library('Shared') _
+
+pipeline {
+    agent { label 'Node' }
+    
+    environment {
+        SONAR_HOME = tool "Sonar"
+    }
+
+    parameters {
+        string(name: 'FRONTEND_DOCKER_TAG', defaultValue: '', description: 'Frontend Docker image tag')
+        string(name: 'BACKEND_DOCKER_TAG', defaultValue: '', description: 'Backend Docker image tag')
+    }
+    
+    stages {
+        stage("Validate Parameters") {
+            steps {
+                script {
+                    if (params.FRONTEND_DOCKER_TAG == '' || params.BACKEND_DOCKER_TAG == '') {
+                        error("FRONTEND_DOCKER_TAG and BACKEND_DOCKER_TAG must be provided.")
+                    }
+                }
+            }
+        }
+
+        stage("Workspace Cleanup") {
+            steps {
+                cleanWs()
+            }
+        }
+        
+        stage('Git: Code Checkout') {
+            steps {
+                script {
+                    code_checkout("https://github.com/krboinapalli221/WanderLust_Project.git", "main")
+                }
+            }
+        }
+        
+        stage("Trivy: Filesystem Scan") {
+            steps {
+                script {
+                    trivy_scan()
+                }
+            }
+        }
+
+        stage("OWASP: Dependency Check") {
+            steps {
+                script {
+                    owasp_dependency()
+                }
+            }
+        }
+        
+        stage("SonarQube: Code Analysis") {
+            steps {
+                script {
+                    sonarqube_analysis("Sonar", "wanderlust", "wanderlust")
+                }
+            }
+        }
+        
+        stage("SonarQube: Quality Gates") {
+            steps {
+                script {
+                    sonarqube_code_quality()
+                }
+            }
+        }
+
+        stage("Docker: Build Images") {
+            parallel {
+                stage("Backend Docker Build") {
+                    steps {
+                        dir('backend') {
+                            script {
+                                docker_build("wanderlust-backend-beta", "${params.BACKEND_DOCKER_TAG}", "koteswararao221")
+                            }
+                        }
+                    }
+                }
+
+                stage("Frontend Docker Build") {
+                    steps {
+                        dir('frontend') {
+                            script {
+                                docker_build("wanderlust-frontend-beta", "${params.FRONTEND_DOCKER_TAG}", "koteswararao221")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        stage("Docker: Push to DockerHub") {
+            steps {
+                script {
+                    docker_push("wanderlust-backend-beta", "${params.BACKEND_DOCKER_TAG}", "koteswararao221")
+                    docker_push("wanderlust-frontend-beta", "${params.FRONTEND_DOCKER_TAG}", "koteswararao221")
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            archiveArtifacts artifacts: '*.xml', followSymlinks: false
+            // Trigger the CD pipeline with the Docker tags
+            build job: "Wanderlust-CD", parameters: [
+                string(name: 'FRONTEND_DOCKER_TAG', value: "${params.FRONTEND_DOCKER_TAG}"),
+                string(name: 'BACKEND_DOCKER_TAG', value: "${params.BACKEND_DOCKER_TAG}")
+            ]
+        }
+        failure {
+            echo 'CI Pipeline failed!'
+        }
+    }
+}
